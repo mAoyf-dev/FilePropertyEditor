@@ -262,6 +262,14 @@ struct Internet {
   ~Internet() { WinHttpCloseHandle(h); }
   Internet(const Internet &) = delete;
 };
+enum class RequestKind { Api, Page, Download };
+struct HttpError : std::runtime_error {
+  DWORD code;
+  explicit HttpError(DWORD status)
+      : std::runtime_error(
+            Utf8(L"GitHub 请求失败，HTTP " + std::to_wstring(status))),
+        code(status) {}
+};
 struct Url {
   std::wstring host, path;
 };
@@ -292,8 +300,9 @@ bool RedirectUrl(const std::wstring &url) {
   }
 }
 template <class Sink>
-void Request(std::wstring url, const std::atomic_bool &cancel, bool download,
-             Sink sink) {
+void Request(std::wstring url, const std::atomic_bool &cancel, RequestKind kind,
+             Sink sink, std::wstring *finalUrl = nullptr,
+             ULONGLONG *headSize = nullptr) {
   Canceled(cancel);
   Internet session(WinHttpOpen(
       L"FilePropertyEditor/" FP_VERSION_WIDE, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
@@ -308,16 +317,18 @@ void Request(std::wstring url, const std::atomic_bool &cancel, bool download,
     Internet connection(WinHttpConnect(session.h, u.host.c_str(),
                                        INTERNET_DEFAULT_HTTPS_PORT, 0));
     Internet request(WinHttpOpenRequest(
-        connection.h, L"GET", u.path.c_str(), nullptr, WINHTTP_NO_REFERER,
-        WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE));
+        connection.h, finalUrl || headSize ? L"HEAD" : L"GET", u.path.c_str(),
+        nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+        WINHTTP_FLAG_SECURE));
     DWORD disabled = WINHTTP_DISABLE_REDIRECTS;
     WinCheck(WinHttpSetOption(request.h, WINHTTP_OPTION_DISABLE_FEATURE,
                               &disabled, sizeof(disabled)));
-    const wchar_t *headers = L"Accept: application/vnd.github+json\r\n";
-    WinCheck(WinHttpSendRequest(
-        request.h, download ? WINHTTP_NO_ADDITIONAL_HEADERS : headers,
-        download ? 0 : static_cast<DWORD>(-1), WINHTTP_NO_REQUEST_DATA, 0, 0,
-        0));
+    const wchar_t *headers =
+        kind == RequestKind::Api    ? L"Accept: application/vnd.github+json\r\n"
+        : kind == RequestKind::Page ? L"Accept: text/html\r\n"
+                                    : L"Accept: application/octet-stream\r\n";
+    WinCheck(WinHttpSendRequest(request.h, headers, static_cast<DWORD>(-1),
+                                WINHTTP_NO_REQUEST_DATA, 0, 0, 0));
     Canceled(cancel);
     WinCheck(WinHttpReceiveResponse(request.h, nullptr));
     DWORD code = 0, length = sizeof(code);
@@ -332,17 +343,35 @@ void Request(std::wstring url, const std::atomic_bool &cancel, bool download,
                                    WINHTTP_HEADER_NAME_BY_INDEX, target,
                                    &length, WINHTTP_NO_HEADER_INDEX));
       url = target;
-      if (!download || !RedirectUrl(url))
+      if (!(kind == RequestKind::Download
+                ? RedirectUrl(url)
+                : kind == RequestKind::Page && TrustedReleaseUrl(url, false)))
         Fail(L"拒绝不可信的下载重定向");
       continue;
     }
     if (code == 404)
-      Fail(download ? L"发行附件不存在，可能已被删除"
-                    : L"仓库尚无正式 Release，或仓库不可访问");
-    if (code == 403 || code == 429)
-      Fail(L"GitHub 限流或拒绝访问，请稍后重试");
+      Fail(kind == RequestKind::Download
+               ? L"发行附件不存在，可能已被删除"
+               : L"仓库尚无正式 Release，或仓库不可访问");
     if (code != 200)
-      Fail(L"GitHub 请求失败，HTTP " + std::to_wstring(code));
+      throw HttpError(code);
+    if (headSize) {
+      wchar_t number[32];
+      length = sizeof(number);
+      WinCheck(WinHttpQueryHeaders(request.h, WINHTTP_QUERY_CONTENT_LENGTH,
+                                   WINHTTP_HEADER_NAME_BY_INDEX, number,
+                                   &length, WINHTTP_NO_HEADER_INDEX));
+      Json size;
+      size.type = 'n';
+      size.text = number;
+      *headSize = Size(size);
+      if (!*headSize)
+        Fail(L"发行附件为空");
+    }
+    if (finalUrl)
+      *finalUrl = url;
+    if (finalUrl || headSize)
+      return;
     char buffer[65536];
     for (;;) {
       Canceled(cancel);
@@ -453,16 +482,139 @@ ReleaseAsset ChooseAsset(const Release &release, bool x64) {
   }
   return chosen;
 }
+Release ParseReleaseAssets(const std::wstring &releaseUrl,
+                           const std::string &html) {
+  if (!TrustedReleaseUrl(releaseUrl, false) || html.size() > JsonLimit)
+    Fail(L"公开发布页地址或内容无效");
+  Release r;
+  r.url = releaseUrl;
+  r.version = releaseUrl.substr(std::wstring(FP_REPO L"/releases/tag/").size());
+  std::array<unsigned, 4> version{};
+  if (!Version(r.version, version))
+    Fail(L"公开发布页版本标签无效");
+  r.name = r.version;
+  r.notes = L"API 暂不可用，已通过 GitHub "
+            L"公开发布页获取正式版本。完整说明请查看项目发布页。";
+  std::string prefix = Utf8(
+      L"/mAoyf-dev/FilePropertyEditor/releases/download/" + r.version + L"/");
+  size_t pos = 0;
+  while ((pos = html.find("<li", pos)) != std::string::npos) {
+    if (pos + 3 >= html.size() ||
+        (html[pos + 3] != ' ' && html[pos + 3] != '>')) {
+      pos += 3;
+      continue;
+    }
+    auto end = html.find("</li>", pos);
+    if (end == std::string::npos)
+      Fail(L"公开附件列表结构不完整");
+    auto row = html.substr(pos, end - pos);
+    pos = end + 5;
+    auto href = row.find("href=\"" + prefix);
+    if (href == std::string::npos)
+      continue;
+    href += 6;
+    auto quote = row.find('"', href);
+    if (quote == std::string::npos)
+      Fail(L"公开附件链接不完整");
+    ReleaseAsset a;
+    a.url = L"https://github.com" + Wide(row.substr(href, quote - href));
+    if (!TrustedReleaseUrl(a.url, true))
+      continue;
+    auto digest = row.find("sha256:");
+    if (digest == std::string::npos)
+      continue;
+    a.sha256 = Wide(row.substr(digest + 7, 64));
+    if (!Hex(a.sha256))
+      Fail(L"公开附件 SHA-256 无效");
+    CharLowerBuffW(a.sha256.data(), static_cast<DWORD>(a.sha256.size()));
+    std::string encoded =
+        row.substr(href + prefix.size(), quote - href - prefix.size());
+    std::string decoded;
+    for (size_t i = 0; i < encoded.size(); ++i) {
+      if (encoded[i] == '%') {
+        auto hex = [](char c) {
+          return c >= '0' && c <= '9'   ? c - '0'
+                 : c >= 'a' && c <= 'f' ? c - 'a' + 10
+                 : c >= 'A' && c <= 'F' ? c - 'A' + 10
+                                        : -1;
+        };
+        if (i + 2 >= encoded.size() || hex(encoded[i + 1]) < 0 ||
+            hex(encoded[i + 2]) < 0)
+          Fail(L"附件名称编码无效");
+        decoded +=
+            static_cast<char>(hex(encoded[i + 1]) * 16 + hex(encoded[i + 2]));
+        i += 2;
+      } else
+        decoded += encoded[i];
+    }
+    a.name = Wide(decoded);
+    if (a.name.empty() ||
+        a.name.find_first_of(L"/\\:<>|?*\r\n") != std::wstring::npos)
+      continue;
+    bool invalid = false;
+    for (wchar_t c : a.name)
+      if (c < 32)
+        invalid = true;
+    if (!invalid)
+      r.assets.push_back(std::move(a));
+  }
+  return r;
+}
 Release CheckRelease(const std::atomic_bool &cancel) {
-  std::string bytes;
-  Request(L"https://api.github.com/repos/mAoyf-dev/FilePropertyEditor/releases/"
+  static std::atomic<ULONGLONG> retryApiAfter{0};
+  auto read = [&](const std::wstring &url, RequestKind kind) {
+    std::string bytes;
+    Request(url, cancel, kind, [&](const char *data, DWORD size) {
+      if (bytes.size() + size > JsonLimit)
+        Fail(L"更新数据超过大小限制");
+      bytes.append(data, size);
+    });
+    return bytes;
+  };
+  if (GetTickCount64() >= retryApiAfter.load()) {
+    try {
+      return ParseRelease(read(
+          L"https://api.github.com/repos/mAoyf-dev/FilePropertyEditor/releases/"
           L"latest",
-          cancel, false, [&](const char *data, DWORD size) {
-            if (bytes.size() + size > JsonLimit)
+          RequestKind::Api));
+    } catch (const HttpError &e) {
+      if (e.code != 403 && e.code != 429)
+        throw;
+      retryApiAfter = GetTickCount64() + 60ULL * 60 * 1000;
+    }
+  }
+  return CheckPublicRelease(cancel);
+}
+Release CheckPublicRelease(const std::atomic_bool &cancel) {
+  Canceled(cancel);
+  auto ignore = [](const char *, DWORD) {};
+  std::wstring releaseUrl;
+  Request(FP_REPO L"/releases/latest", cancel, RequestKind::Page, ignore,
+          &releaseUrl);
+  if (!TrustedReleaseUrl(releaseUrl, false))
+    Fail(L"未找到有效正式发布页");
+  auto version =
+      releaseUrl.substr(std::wstring(FP_REPO L"/releases/tag/").size());
+  // Validate before incorporating a redirected tag into the next request path.
+  std::array<unsigned, 4> parsed{};
+  if (!Version(version, parsed))
+    Fail(L"未找到有效正式发布页");
+  std::string html;
+  Request(FP_REPO L"/releases/expanded_assets/" + version, cancel,
+          RequestKind::Page, [&](const char *data, DWORD size) {
+            if (html.size() + size > JsonLimit)
               Fail(L"更新数据超过大小限制");
-            bytes.append(data, size);
+            html.append(data, size);
           });
-  return ParseRelease(bytes);
+  auto r = ParseReleaseAssets(releaseUrl, html);
+  auto selected = ChooseAsset(r, sizeof(void *) == 8);
+  r.assets.clear();
+  if (!selected.url.empty()) {
+    Request(selected.url, cancel, RequestKind::Download, ignore, nullptr,
+            &selected.size);
+    r.assets.push_back(std::move(selected));
+  }
+  return r;
 }
 void DownloadRelease(const ReleaseAsset &asset, const std::wstring &destination,
                      const std::atomic_bool &cancel, Progress progress) {
@@ -479,17 +631,18 @@ void DownloadRelease(const ReleaseAsset &asset, const std::wstring &destination,
     Handle output(CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr,
                               CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
     temp.path = temporary;
-    Request(asset.url, cancel, true, [&](const char *data, DWORD size) {
-      if (done + size > asset.size)
-        Fail(L"下载内容超过发行附件大小");
-      DWORD written = 0;
-      WinCheck(WriteFile(output.h, data, size, &written, nullptr));
-      if (written != size)
-        Fail(L"下载文件写入不完整");
-      done += size;
-      if (progress)
-        progress(done, asset.size);
-    });
+    Request(asset.url, cancel, RequestKind::Download,
+            [&](const char *data, DWORD size) {
+              if (done + size > asset.size)
+                Fail(L"下载内容超过发行附件大小");
+              DWORD written = 0;
+              WinCheck(WriteFile(output.h, data, size, &written, nullptr));
+              if (written != size)
+                Fail(L"下载文件写入不完整");
+              done += size;
+              if (progress)
+                progress(done, asset.size);
+            });
     if (done != asset.size)
       Fail(L"下载中断或附件大小不符");
     WinCheck(FlushFileBuffers(output.h));

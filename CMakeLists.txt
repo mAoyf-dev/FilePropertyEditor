@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(FilePropertyEditor VERSION 2.1.0 LANGUAGES CXX RC)
+project(FilePropertyEditor VERSION 2.1.1 LANGUAGES CXX RC)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 add_compile_definitions(UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0601 NTDDI_VERSION=0x06010000)

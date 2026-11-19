@@ -9,7 +9,7 @@
       return 1;                                                                \
     }                                                                          \
   } while (0)
-int main(int argc, char **argv) {
+int RunTests(int argc, char **argv) {
   using namespace fp;
   CHECK(NewerVersion(L"v2.10.0", L"2.9.0"));
   CHECK(!NewerVersion(L"v2.1.0", L"2.1.0"));
@@ -50,6 +50,22 @@ int main(int argc, char **argv) {
   architecture.assets.push_back({L"app_x86_64.zip", L"unused", L"", 3});
   CHECK(ChooseAsset(architecture, false).url.empty());
   CHECK(ChooseAsset(architecture, true).size == 3);
+  const std::string html =
+      R"(<ul><li><a href="/mAoyf-dev/FilePropertyEditor/releases/download/V2.1.0/FilePropertyEditor_v2.1.0_32-64.zip">package</a><span>sha256:1f397ff21648e530cd852c02b1568cb8b3d7a03a5d54edd8bee3e193600ccaf1</span></li><li><a href="/other/repo/releases/download/V2.1.0/evil_x64.zip">evil</a></li><li><a href="/mAoyf-dev/FilePropertyEditor/archive/refs/tags/V2.1.0.zip">source</a></li></ul>)";
+  auto fallback = ParseReleaseAssets(
+      L"https://github.com/mAoyf-dev/FilePropertyEditor/releases/tag/V2.1.0",
+      html);
+  CHECK(fallback.version == L"V2.1.0" && fallback.assets.size() == 1);
+  CHECK(ChooseAsset(fallback, true).name ==
+        L"FilePropertyEditor_v2.1.0_32-64.zip");
+  CHECK(fallback.assets[0].sha256 ==
+        L"1f397ff21648e530cd852c02b1568cb8b3d7a03a5d54edd8bee3e193600ccaf1");
+  CHECK(
+      ParseReleaseAssets(
+          fallback.url, "<li><a "
+                        "href=\"/mAoyf-dev/FilePropertyEditor/releases/"
+                        "download/V2.1.0/app_x64.zip\">missing digest</a></li>")
+          .assets.empty());
   architecture.assets[0].name = L"app_x86_and_x64.zip";
   CHECK(ChooseAsset(architecture, false).url.empty());
   CHECK(ChooseAsset(architecture, true).url.empty());
@@ -79,9 +95,11 @@ int main(int argc, char **argv) {
   CHECK(stopped);
   CHECK(GetFileAttributesW(L"build/should-not-exist.zip") ==
         INVALID_FILE_ATTRIBUTES);
-  if (argc > 1 && std::string(argv[1]) == "--online") {
+  if (argc > 1 && (std::string(argv[1]) == "--online" ||
+                   std::string(argv[1]) == "--public")) {
     cancel = false;
-    auto live = CheckRelease(cancel);
+    auto live = std::string(argv[1]) == "--public" ? CheckPublicRelease(cancel)
+                                                   : CheckRelease(cancel);
     auto asset = ChooseAsset(live, sizeof(void *) == 8);
     CHECK(!asset.url.empty() && !asset.sha256.empty());
     std::cout << "live tag: " << Utf8(live.version)
@@ -141,4 +159,13 @@ int main(int argc, char **argv) {
     std::cout << "online download/cancel/checksum/size/cleanup tests passed\n";
   }
   std::cout << "update tests passed\n";
+  return 0;
+}
+int main(int argc, char **argv) {
+  try {
+    return RunTests(argc, argv);
+  } catch (const std::exception &e) {
+    std::cerr << "Update test error: " << e.what() << "\n";
+    return 1;
+  }
 }
