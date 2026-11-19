@@ -1,0 +1,16 @@
+/build/
+/dist/
+/.vs/
+/out/
+*.obj
+*.pdb
+*.ilk
+*.user
+*.suo
+*.bak
+*.fpv-*
+
+# Original binaries and local reverse-engineering evidence are not source deliverables.
+/*.exe
+/REA-*-evidence.json
+/文件属性.txt

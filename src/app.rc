@@ -1,0 +1,42 @@
+#pragma code_page(65001)
+#include <windows.h>
+#include "resource.h"
+1 RT_MANIFEST "app.manifest"
+1 VERSIONINFO
+ FILEVERSION 2,0,0,0
+ PRODUCTVERSION 2,0,0,0
+ FILEFLAGSMASK 0x3fL
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+BEGIN
+ BLOCK "StringFileInfo"
+ BEGIN
+  BLOCK "080404b0"
+  BEGIN
+   VALUE "FileDescription", "文件属性查改器\0"
+   VALUE "FileVersion", "2.0.0.0\0"
+   VALUE "ProductName", "文件属性查改器\0"
+   VALUE "ProductVersion", "2.0.0.0\0"
+   VALUE "OriginalFilename", "FilePropertyEditor.exe\0"
+   VALUE "Comments", "C++ / Win32 原生文件属性查看与修改工具\0"
+  END
+ END
+ BLOCK "VarFileInfo"
+ BEGIN
+  VALUE "Translation", 0x804,1200
+ END
+END
+IDD_EDIT DIALOGEX 0,0,430,280
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "修改属性"
+FONT 9,"Microsoft YaHei UI"
+BEGIN
+ LTEXT "属性",IDC_FIELD,12,10,405,18
+ LTEXT "目标文件",IDC_TARGET,12,32,405,30
+ EDITTEXT IDC_VALUE,12,66,405,92,ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL | WS_TABSTOP
+ LTEXT "提示",IDC_HINT,12,166,405,45
+ CONTROL "应用到左侧所有选中文件",IDC_BATCH,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,12,214,405,16
+ CONTROL "我了解内容修改会改变哈希，可能使数字签名失效",IDC_ACK,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,12,234,405,16
+ DEFPUSHBUTTON "保存修改",IDOK,266,258,72,18
+ PUSHBUTTON "取消",IDCANCEL,346,258,72,18
+END
