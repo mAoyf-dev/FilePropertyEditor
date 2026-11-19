@@ -14,10 +14,10 @@ try {
     $env:PATH = "$bin;$oldPath"
     New-Item -ItemType Directory -Path "build/$arch/Release" -Force | Out-Null
     $common = @('/nologo','/std:c++17','/utf-8','/W4','/permissive-','/EHsc','/MT','/O2','/DUNICODE','/D_UNICODE','/DWIN32_LEAN_AND_MEAN','/DNOMINMAX','/D_WIN32_WINNT=0x0601','/DNTDDI_VERSION=0x06010000',"/I$vc/include", "/I$sdk/Include/$sdkVersion/ucrt", "/I$sdk/Include/$sdkVersion/shared", "/I$sdk/Include/$sdkVersion/um", "/I$sdk/Include/$sdkVersion/winrt",'/Isrc')
-    $libs = @("/LIBPATH:$vc/lib/$arch", "/LIBPATH:$sdk/Lib/$sdkVersion/ucrt/$arch", "/LIBPATH:$sdk/Lib/$sdkVersion/um/$arch",'user32.lib','gdi32.lib','comctl32.lib','comdlg32.lib','shell32.lib','shlwapi.lib','propsys.lib','ole32.lib','oleaut32.lib','uuid.lib','version.lib','advapi32.lib','wintrust.lib','crypt32.lib','msxml6.lib')
+    $libs = @("/LIBPATH:$vc/lib/$arch", "/LIBPATH:$sdk/Lib/$sdkVersion/ucrt/$arch", "/LIBPATH:$sdk/Lib/$sdkVersion/um/$arch",'user32.lib','gdi32.lib','comctl32.lib','comdlg32.lib','shell32.lib','shlwapi.lib','propsys.lib','ole32.lib','oleaut32.lib','uuid.lib','version.lib','advapi32.lib','wintrust.lib','crypt32.lib','msxml6.lib','winhttp.lib')
     & "$sdk/bin/$sdkVersion/x64/rc.exe" /nologo "/I$sdk/Include/$sdkVersion/um" "/I$sdk/Include/$sdkVersion/shared" /fo "build/$arch/app.res" src/app.rc
     if ($LASTEXITCODE) { throw "资源编译失败: $arch" }
-    $core = @('src/core.cpp','src/inspect.cpp','src/edit.cpp','src/version.cpp','src/export.cpp')
+    $core = @('src/core.cpp','src/inspect.cpp','src/edit.cpp','src/version.cpp','src/export.cpp','src/update.cpp')
     & "$bin/cl.exe" @common @core src/app.cpp "build/$arch/app.res" "/Fobuild/$arch/" "/Febuild/$arch/Release/FilePropertyEditor.exe" /link @libs /MANIFEST:NO /SUBSYSTEM:WINDOWS,6.01
     if ($LASTEXITCODE) { throw "应用构建失败: $arch" }
     if ($Test) {
@@ -25,6 +25,10 @@ try {
       if ($LASTEXITCODE) { throw "测试构建失败: $arch" }
       & "./build/$arch/Release/property_tests.exe"
       if ($LASTEXITCODE) { throw "测试失败: $arch" }
+      & "$bin/cl.exe" @common @core tests/update_tests.cpp "/Fobuild/$arch/" "/Febuild/$arch/Release/update_tests.exe" /link @libs /SUBSYSTEM:CONSOLE,6.01
+      if ($LASTEXITCODE) { throw "更新测试构建失败: $arch" }
+      & "./build/$arch/Release/update_tests.exe"
+      if ($LASTEXITCODE) { throw "更新测试失败: $arch" }
     }
     New-Item -ItemType Directory -Path "dist/$arch" -Force | Out-Null
     Copy-Item -LiteralPath "build/$arch/Release/FilePropertyEditor.exe" -Destination "dist/$arch/文件属性查改器.exe"

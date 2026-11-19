@@ -1,5 +1,7 @@
 #include "internal.h"
 #include "resource.h"
+#include "update.h"
+#include "version.h"
 #include <commctrl.h>
 #include <commdlg.h>
 #include <memory>
@@ -32,9 +34,17 @@ enum {
   Status,
   Bar,
   Help,
-  Log
+  Log,
+  About,
+  Update
 };
-enum { DataMessage = WM_APP + 1, ProgressMessage, DoneMessage, LogMessage };
+enum {
+  DataMessage = WM_APP + 1,
+  ProgressMessage,
+  DoneMessage,
+  LogMessage,
+  UpdateMessage
+};
 const wchar_t *ClassName = L"FilePropertyEditorV2";
 HINSTANCE instance;
 HWND window, fileList, propList, detail, status, bar, search;
@@ -47,6 +57,13 @@ std::thread worker;
 std::atomic_bool canceled{false};
 std::wstring jobLog;
 std::vector<HWND> commands;
+enum class Operation { Files, CheckUpdate, Download };
+Operation operation = Operation::Files;
+struct UpdateData {
+  Release release;
+  std::wstring path;
+};
+std::unique_ptr<UpdateData> updateResult;
 struct Data {
   FileInfo info;
   int replace = -1;
@@ -214,6 +231,7 @@ void Start(std::function<void()> work) {
   if (worker.joinable())
     worker.join();
   canceled = false;
+  operation = Operation::Files;
   Busy(true);
   try {
     worker = std::thread([work = std::move(work)]() {
@@ -234,6 +252,123 @@ void Start(std::function<void()> work) {
     Busy(false);
     throw;
   }
+}
+void OpenLink(HWND owner, const wchar_t *url) {
+  auto result = reinterpret_cast<INT_PTR>(
+      ShellExecuteW(owner, L"open", url, nullptr, nullptr, SW_SHOWNORMAL));
+  if (result <= 32)
+    MessageBoxW(owner, L"无法打开默认浏览器，请手动访问 GitHub。",
+                L"打开链接失败", MB_OK | MB_ICONERROR);
+}
+HRESULT CALLBACK AboutCallback(HWND h, UINT notification, WPARAM, LPARAM l,
+                               LONG_PTR) {
+  if (notification == TDN_HYPERLINK_CLICKED) {
+    auto url = reinterpret_cast<const wchar_t *>(l);
+    if (!wcscmp(url, FP_HOME) || !wcscmp(url, FP_REPO))
+      OpenLink(h, url);
+  }
+  return S_OK;
+}
+void ShowAbout() {
+  TASKDIALOGCONFIG config{sizeof(config)};
+  config.hwndParent = window;
+  config.dwFlags = TDF_ENABLE_HYPERLINKS | TDF_ALLOW_DIALOG_CANCELLATION |
+                   TDF_SIZE_TO_CONTENT;
+  config.dwCommonButtons = TDCBF_CLOSE_BUTTON;
+  config.pszWindowTitle = L"关于文件属性查改器";
+  config.pszMainInstruction = L"文件属性查改器 V" FP_VERSION_WIDE;
+  config.pszContent =
+      L"作者：<a href=\"" FP_HOME L"\">" FP_AUTHOR L"</a>\n"
+      L"项目：<a href=\"" FP_REPO L"\">GitHub / FilePropertyEditor</a>\n\n"
+      L"C++ / Win32 原生开发，提供 32 / 64 位版本。\n"
+      L"点击“检查更新”查询正式 Release；下载后请手动解压或运行。\n"
+      L"原版 V1.2 作者：苦瓜甘甜（wszjf），详见 REA 分析报告。";
+  config.pfCallback = AboutCallback;
+  Hr(TaskDialogIndirect(&config, nullptr, nullptr, nullptr));
+}
+void CheckUpdates() {
+  updateResult.reset();
+  Start([] {
+    Progress(L"正在检查 GitHub 最新正式版本…");
+    auto release = CheckRelease(canceled);
+    Post(UpdateMessage, new UpdateData{std::move(release), L""});
+  });
+  operation = Operation::CheckUpdate;
+}
+void OfferDownload(const Release &release) {
+  if (!NewerVersion(release.version, FP_VERSION_WIDE)) {
+    MessageBoxW(window,
+                (L"当前版本：" FP_VERSION_WIDE L"\n最新正式版本：" +
+                 release.version + L"\n当前已是最新版本。")
+                    .c_str(),
+                L"检查更新", MB_OK | MB_ICONINFORMATION);
+    return;
+  }
+#ifdef _WIN64
+  auto asset = ChooseAsset(release, true);
+#else
+  auto asset = ChooseAsset(release, false);
+#endif
+  if (asset.url.empty()) {
+    if (MessageBoxW(
+            window,
+            (L"发现新版本 " + release.version +
+             L"，但没有可识别的当前架构附件。\n是否打开发布页手动选择？")
+                .c_str(),
+            L"检查更新", MB_YESNO | MB_ICONINFORMATION) == IDYES)
+      OpenLink(window, release.url.c_str());
+    return;
+  }
+  auto message = L"当前版本：" FP_VERSION_WIDE L"\n新版本：" + release.version +
+                 L"\n附件：" + asset.name + L"（" +
+                 std::to_wstring(asset.size) + L" 字节）\n\n" +
+                 release.notes.substr(0, 1800) + L"\n\n" +
+                 (asset.sha256.empty()
+                      ? L"该附件未提供 SHA-256；仅验证 HTTPS 和文件大小。\n"
+                      : L"下载后将校验 SHA-256。\n") +
+                 L"是否选择保存位置并下载？下载内容不会自动运行。";
+  if (MessageBoxW(window, message.c_str(), L"发现新版本",
+                  MB_YESNO | MB_ICONINFORMATION) != IDYES)
+    return;
+  std::vector<wchar_t> path(32768);
+  wcsncpy_s(path.data(), path.size(), asset.name.c_str(), _TRUNCATE);
+  OPENFILENAMEW dialog{sizeof(dialog)};
+  dialog.hwndOwner = window;
+  dialog.lpstrTitle = L"保存新版发布文件";
+  dialog.lpstrFilter = L"发布文件\0*.zip;*.exe\0所有文件\0*.*\0";
+  dialog.lpstrFile = path.data();
+  dialog.nMaxFile = static_cast<DWORD>(path.size());
+  dialog.lpstrDefExt = PathFindExtensionW(asset.name.c_str()) + 1;
+  dialog.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR |
+                 OFN_NODEREFERENCELINKS;
+  if (!GetSaveFileNameW(&dialog)) {
+    DWORD error = CommDlgExtendedError();
+    if (error)
+      Fail(L"保存位置对话框失败：" + std::to_wstring(error));
+    return;
+  }
+  std::wstring destination = FullPath(path.data());
+  wchar_t executable[32768];
+  DWORD length = GetModuleFileNameW(nullptr, executable,
+                                    static_cast<DWORD>(std::size(executable)));
+  if (!length || length == std::size(executable))
+    Fail(L"无法确认当前程序路径");
+  if (!_wcsicmp(destination.c_str(), FullPath(executable).c_str()))
+    Fail(L"请另存新版文件，不要覆盖正在运行的程序");
+  for (const auto &file : files)
+    if (!_wcsicmp(destination.c_str(), FullPath(file.path).c_str()))
+      Fail(L"不能将下载内容覆盖到列表中的文件");
+  updateResult.reset();
+  Start([asset, destination] {
+    DownloadRelease(asset, destination, canceled,
+                    [&](ULONGLONG done, ULONGLONG total) {
+                      Progress(L"下载新版：" + std::to_wstring(done) + L" / " +
+                                   std::to_wstring(total) + L" 字节",
+                               static_cast<int>(done * 1000 / total));
+                    });
+    Post(UpdateMessage, new UpdateData{{}, destination});
+  });
+  operation = Operation::Download;
 }
 void UpdateHashes(FileInfo &info, bool md5, bool sha) {
   if (!md5 && !sha)
@@ -606,6 +741,8 @@ void Layout() {
   Move(Control(Hash), 190, 52, 100, 29);
   Move(Control(Cancel), 298, 52, 72, 29);
   Move(Control(Recursive), 385, 55, 165, 25);
+  Move(Control(About), 560, 52, 80, 29);
+  Move(Control(Update), 648, 52, 100, 29);
   Move(Control(OnlyEdit), w - 168, 94, 154, 25);
   Move(search, left + 28, 91, w - left - 210, 28);
   Move(fileList, 14, 91, left, h - 156);
@@ -642,10 +779,12 @@ void CreateControls() {
                                                     {Cancel, L"取消任务"},
                                                     {EditOne, L"修改此项…"},
                                                     {Help, L"说明"},
+                                                    {About, L"关于…"},
+                                                    {Update, L"检查更新"},
                                                     {Log, L"操作结果…"}}) {
     auto h = Make(L"BUTTON", p.second, WS_TABSTOP | BS_PUSHBUTTON, p.first);
-    if (p.first != Cancel && p.first != Help && p.first != Copy &&
-        p.first != Log)
+    if (p.first != Cancel && p.first != Help && p.first != About &&
+        p.first != Copy && p.first != Log)
       commands.push_back(h);
   }
   for (const auto &p : std::vector<std::pair<int, const wchar_t *>>{
@@ -740,7 +879,11 @@ LRESULT CALLBACK WindowProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
             L"型识别仅覆盖常见文件头，签名验证离线且不检查目录签名。\r\n\r\n导"
             L"出全部文件为 TXT、CSV 或真正 XLSX。CSV 会保护公式文本；用 XLSX "
             L"可避免 Excel 自动改写版本号和摘要。",
-            L"文件属性查改器 V2.0", MB_OK | MB_ICONINFORMATION);
+            L"文件属性查改器 V" FP_VERSION_WIDE, MB_OK | MB_ICONINFORMATION);
+        return 0;
+      }
+      if (id == About) {
+        ShowAbout();
         return 0;
       }
       if (id == Copy) {
@@ -763,6 +906,9 @@ LRESULT CALLBACK WindowProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
       if (busy)
         return 0;
       switch (id) {
+      case Update:
+        CheckUpdates();
+        break;
       case Add:
         AddFiles();
         break;
@@ -883,17 +1029,46 @@ LRESULT CALLBACK WindowProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
       jobLog += *p + L"\r\n";
       return 0;
     }
-    case DoneMessage:
+    case UpdateMessage:
+      updateResult.reset(reinterpret_cast<UpdateData *>(l));
+      return 0;
+    case DoneMessage: {
       if (worker.joinable())
         worker.join();
       Busy(false);
       SendMessageW(bar, PBM_SETPOS, canceled ? 0 : 1000, 0);
-      StatusText((canceled ? L"已取消。" : L"任务完成。") +
-                 std::wstring(L"共 ") + std::to_wstring(files.size()) +
-                 L" 个文件" + (jobLog.empty() ? L"" : L"；请查看“操作结果”"));
-      if (closing)
+      auto completed = operation;
+      operation = Operation::Files;
+      if (completed == Operation::Files)
+        StatusText((canceled ? L"已取消。" : L"任务完成。") +
+                   std::wstring(L"共 ") + std::to_wstring(files.size()) +
+                   L" 个文件" + (jobLog.empty() ? L"" : L"；请查看“操作结果”"));
+      else
+        StatusText(canceled         ? L"更新操作已取消。"
+                   : jobLog.empty() ? L"更新操作完成。"
+                                    : L"更新操作失败，请查看“操作结果”。");
+      if (closing) {
         DestroyWindow(h);
+        return 0;
+      }
+      if (completed != Operation::Files && !canceled) {
+        if (!jobLog.empty())
+          MessageBoxW(h, jobLog.c_str(), L"更新操作未完成",
+                      MB_OK | MB_ICONERROR);
+        else if (updateResult) {
+          auto result = std::move(updateResult);
+          if (completed == Operation::CheckUpdate)
+            OfferDownload(result->release);
+          else
+            MessageBoxW(h,
+                        (L"已下载并验证文件：\n" + result->path +
+                         L"\n\n请手动解压或运行；当前程序不会自动替换。")
+                            .c_str(),
+                        L"下载完成", MB_OK | MB_ICONINFORMATION);
+        }
+      }
       return 0;
+    }
     case WM_CLOSE:
       if (busy) {
         closing = true;
@@ -937,9 +1112,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
   cls.lpszClassName = ClassName;
   RegisterClassExW(&cls);
 #ifdef _WIN64
-  const wchar_t *title = L"文件属性查改器 V2.0 · 64 位";
+  const wchar_t *title = L"文件属性查改器 V" FP_VERSION_WIDE L" · 64 位";
 #else
-  const wchar_t *title = L"文件属性查改器 V2.0 · 32 位";
+  const wchar_t *title = L"文件属性查改器 V" FP_VERSION_WIDE L" · 32 位";
 #endif
   RECT work{};
   SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);

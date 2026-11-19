@@ -1,10 +1,11 @@
 #pragma code_page(65001)
 #include <windows.h>
 #include "resource.h"
+#include "version.h"
 1 RT_MANIFEST "app.manifest"
 1 VERSIONINFO
- FILEVERSION 2,0,0,0
- PRODUCTVERSION 2,0,0,0
+ FILEVERSION FP_VERSION_NUM
+ PRODUCTVERSION FP_VERSION_NUM
  FILEFLAGSMASK 0x3fL
  FILEOS VOS_NT_WINDOWS32
  FILETYPE VFT_APP
@@ -14,11 +15,13 @@ BEGIN
   BLOCK "080404b0"
   BEGIN
    VALUE "FileDescription", "文件属性查改器\0"
-   VALUE "FileVersion", "2.0.0.0\0"
+   VALUE "FileVersion", FP_VERSION_TEXT "\0"
    VALUE "ProductName", "文件属性查改器\0"
-   VALUE "ProductVersion", "2.0.0.0\0"
+   VALUE "ProductVersion", FP_VERSION_TEXT "\0"
+   VALUE "CompanyName", "mAoyf-dev\0"
+   VALUE "LegalCopyright", "Copyright (c) 2026 mAoyf-dev\0"
    VALUE "OriginalFilename", "FilePropertyEditor.exe\0"
-   VALUE "Comments", "C++ / Win32 原生文件属性查看与修改工具\0"
+   VALUE "Comments", "C++ / Win32 | https://github.com/mAoyf-dev/FilePropertyEditor\0"
   END
  END
  BLOCK "VarFileInfo"
